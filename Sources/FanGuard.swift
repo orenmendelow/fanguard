@@ -3,10 +3,9 @@ import IOKit
 import Foundation
 import UserNotifications
 
-// MARK: - SMC Interface
+// MARK: - SMC
 
 let SMC_CMD_READ_BYTES: UInt8 = 5
-let SMC_CMD_WRITE_BYTES: UInt8 = 6
 let SMC_CMD_READ_KEYINFO: UInt8 = 9
 
 struct SMCKeyData {
@@ -19,359 +18,400 @@ struct SMCKeyData {
                 UInt8,UInt8,UInt8,UInt8,UInt8,UInt8,UInt8,UInt8,UInt8,UInt8,UInt8,UInt8,UInt8,UInt8,UInt8,UInt8) = (0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0)
 }
 
-func fourCharCode(_ str: String) -> UInt32 {
-    var result: UInt32 = 0
-    for char in str.utf8 { result = (result << 8) | UInt32(char) }
-    return result
-}
+func fourCC(_ s: String) -> UInt32 { var r: UInt32 = 0; for c in s.utf8 { r = (r << 8) | UInt32(c) }; return r }
 
-class SMCReader {
+class SMC {
     private var conn: io_connect_t = 0
-    private var isOpen = false
-
     init?() {
-        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSMCKeysEndpoint"))
-        guard service != 0 else { return nil }
-        let result = IOServiceOpen(service, mach_task_self_, 0, &conn)
-        IOObjectRelease(service)
-        guard result == kIOReturnSuccess else { return nil }
-        isOpen = true
+        let svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSMCKeysEndpoint"))
+        guard svc != 0 else { return nil }
+        let r = IOServiceOpen(svc, mach_task_self_, 0, &conn); IOObjectRelease(svc)
+        guard r == kIOReturnSuccess else { return nil }
     }
-
-    deinit {
-        if isOpen { IOServiceClose(conn) }
-    }
-
-    func readKey(_ key: String) -> (bytes: [UInt8], size: UInt32, type: UInt32)? {
+    deinit { IOServiceClose(conn) }
+    func float(_ key: String) -> Float? {
         var inp = SMCKeyData(); var out = SMCKeyData()
-        inp.key = fourCharCode(key); inp.data8 = SMC_CMD_READ_KEYINFO
-        var outSize = MemoryLayout<SMCKeyData>.size
-        var r = IOConnectCallStructMethod(conn, 2, &inp, MemoryLayout<SMCKeyData>.size, &out, &outSize)
+        inp.key = fourCC(key); inp.data8 = SMC_CMD_READ_KEYINFO
+        var sz = MemoryLayout<SMCKeyData>.size
+        var r = IOConnectCallStructMethod(conn, 2, &inp, sz, &out, &sz)
         guard r == kIOReturnSuccess else { return nil }
-        let ds = out.keyInfo.dataSize; let dt = out.keyInfo.dataType
-        inp.keyInfo.dataSize = ds; inp.data8 = SMC_CMD_READ_BYTES
-        r = IOConnectCallStructMethod(conn, 2, &inp, MemoryLayout<SMCKeyData>.size, &out, &outSize)
+        inp.keyInfo.dataSize = out.keyInfo.dataSize; inp.data8 = SMC_CMD_READ_BYTES
+        r = IOConnectCallStructMethod(conn, 2, &inp, sz, &out, &sz)
         guard r == kIOReturnSuccess else { return nil }
-        var bytes: [UInt8] = []
-        withUnsafeBytes(of: &out.bytes) { ptr in for i in 0..<Int(ds) { bytes.append(ptr[i]) } }
-        return (bytes, ds, dt)
+        var v: Float = 0
+        withUnsafeBytes(of: &out.bytes) { p in memcpy(&v, p.baseAddress!, 4) }
+        return v
     }
-
-    func readFloat(_ key: String) -> Float? {
-        guard let r = readKey(key), r.bytes.count >= 4 else { return nil }
-        var value: Float = 0
-        let b = r.bytes
-        memcpy(&value, b, 4)
-        return value
-    }
-
-    func readUInt8(_ key: String) -> UInt8? {
-        guard let r = readKey(key), !r.bytes.isEmpty else { return nil }
-        return r.bytes[0]
+    func uint8(_ key: String) -> UInt8? {
+        var inp = SMCKeyData(); var out = SMCKeyData()
+        inp.key = fourCC(key); inp.data8 = SMC_CMD_READ_KEYINFO
+        var sz = MemoryLayout<SMCKeyData>.size
+        var r = IOConnectCallStructMethod(conn, 2, &inp, sz, &out, &sz)
+        guard r == kIOReturnSuccess else { return nil }
+        inp.keyInfo.dataSize = out.keyInfo.dataSize; inp.data8 = SMC_CMD_READ_BYTES
+        r = IOConnectCallStructMethod(conn, 2, &inp, sz, &out, &sz)
+        guard r == kIOReturnSuccess else { return nil }
+        var v: UInt8 = 0
+        withUnsafeBytes(of: &out.bytes) { p in v = p[0] }
+        return v
     }
 }
 
-// MARK: - Fan Data
+// MARK: - XPC Writer
 
-struct FanState {
-    var fan0Actual: Float = 0
-    var fan0Target: Float = 0
-    var fan0Mode: UInt8 = 0
-    var fan1Actual: Float = 0
-    var fan1Target: Float = 0
-    var fan1Mode: UInt8 = 0
-    var cpuTemp: Float = 0
-    var gpuTemp: Float = 0
+func smcWrite(_ key: String, _ value: String) {
+    let svc = "com.crystalidea.macsfancontrol.smcwrite"
+    let c = xpc_connection_create_mach_service(svc, nil, UInt64(XPC_CONNECTION_MACH_SERVICE_PRIVILEGED))
+    xpc_connection_set_event_handler(c) { _ in }; xpc_connection_resume(c)
+    let o = xpc_dictionary_create(nil, nil, 0); xpc_dictionary_set_string(o, "command", "open")
+    let _ = xpc_connection_send_message_with_reply_sync(c, o)
+    let w = xpc_dictionary_create(nil, nil, 0)
+    xpc_dictionary_set_string(w, "command", "write")
+    xpc_dictionary_set_string(w, "key", key)
+    xpc_dictionary_set_string(w, "value", value)
+    let _ = xpc_connection_send_message_with_reply_sync(c, w)
+    let cl = xpc_dictionary_create(nil, nil, 0); xpc_dictionary_set_string(cl, "command", "close")
+    let _ = xpc_connection_send_message_with_reply_sync(c, cl)
+    xpc_connection_cancel(c)
+}
 
-    var fan0Status: String {
-        if fan0Mode == 1 && fan0Target == 0 { return "DISABLED" }
-        if fan0Actual == 0 && fan0Target > 0 { return "FAULT" }
-        return "\(Int(fan0Actual)) RPM"
-    }
+func floatHex(_ v: Float) -> String {
+    var f = v; var b = [UInt8](repeating: 0, count: 4); memcpy(&b, &f, 4)
+    return b.map { String(format: "%02x", $0) }.joined()
+}
 
-    var fan1Status: String {
-        if fan1Actual == 0 && fan1Target > 100 { return "FAULT" }
-        if fan1Target == 0 { return "Idle" }
-        return "\(Int(fan1Actual)) RPM"
-    }
+// MARK: - Fan Mode
 
-    var fan1Healthy: Bool {
-        // Healthy if: target is low/zero (system doesn't need cooling) OR fan is spinning
-        if fan1Target < 100 { return true }
-        return fan1Actual > 0
-    }
+enum FanMode: Int { case auto = 0; case manual = 1; case off = 2 }
 
-    var overheating: Bool {
-        return cpuTemp > 100
-    }
+// MARK: - Per-Fan Control View
 
-    var menuBarText: String {
-        let tempStr = cpuTemp > 0 ? "\(Int(cpuTemp))°" : "--°"
-        let f1Str: String
-        if fan1Actual > 0 {
-            f1Str = "\(Int(fan1Actual))"
-        } else if fan1Target < 100 {
-            f1Str = "idle"
-        } else {
-            f1Str = "ERR"
+class FanView: NSView {
+    let fanIndex: Int
+    let nameLabel: NSTextField
+    let rpmLabel: NSTextField
+    let dot: NSView
+    let seg: NSSegmentedControl  // Auto | Manual | Off
+    let slider: NSSlider
+    let sliderLabel: NSTextField
+    var sliderRow: NSView!
+
+    var mode: FanMode = .auto
+    var manualRPM: Float = 2500
+    var lastActual: Float = 0
+    var onChanged: (() -> Void)?
+
+    // Constraints we toggle
+    var heightWithSlider: NSLayoutConstraint!
+    var heightWithoutSlider: NSLayoutConstraint!
+
+    init(name: String, index: Int, defaultMode: FanMode) {
+        fanIndex = index
+        mode = defaultMode
+
+        dot = NSView(); dot.wantsLayer = true; dot.layer?.cornerRadius = 4
+        nameLabel = NSTextField(labelWithString: name)
+        nameLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        rpmLabel = NSTextField(labelWithString: "--")
+        rpmLabel.font = .monospacedDigitSystemFont(ofSize: 13, weight: .medium)
+        rpmLabel.alignment = .right
+
+        seg = NSSegmentedControl(labels: ["Auto", "Manual", "Off"], trackingMode: .selectOne, target: nil, action: nil)
+        seg.controlSize = .small
+        seg.font = .systemFont(ofSize: 11)
+        seg.selectedSegment = defaultMode.rawValue
+
+        slider = NSSlider(value: 2500, minValue: 0, maxValue: 6800, target: nil, action: nil)
+        slider.controlSize = .small
+        sliderLabel = NSTextField(labelWithString: "2500")
+        sliderLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        sliderLabel.alignment = .right
+
+        super.init(frame: .zero)
+
+        seg.target = self; seg.action = #selector(segChanged)
+        slider.target = self; slider.action = #selector(sliderChanged)
+
+        // Slider row container
+        sliderRow = NSView()
+        sliderRow.addSubview(slider)
+        sliderRow.addSubview(sliderLabel)
+        slider.translatesAutoresizingMaskIntoConstraints = false
+        sliderLabel.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            slider.leadingAnchor.constraint(equalTo: sliderRow.leadingAnchor),
+            slider.centerYAnchor.constraint(equalTo: sliderRow.centerYAnchor),
+            slider.trailingAnchor.constraint(equalTo: sliderLabel.leadingAnchor, constant: -8),
+            sliderLabel.trailingAnchor.constraint(equalTo: sliderRow.trailingAnchor),
+            sliderLabel.centerYAnchor.constraint(equalTo: sliderRow.centerYAnchor),
+            sliderLabel.widthAnchor.constraint(equalToConstant: 40),
+            sliderRow.heightAnchor.constraint(equalToConstant: 20),
+        ])
+
+        for v: NSView in [dot, nameLabel, rpmLabel, seg, sliderRow!] {
+            addSubview(v); v.translatesAutoresizingMaskIntoConstraints = false
         }
-        return "\(tempStr) R:\(f1Str)"
+        translatesAutoresizingMaskIntoConstraints = false
+
+        heightWithSlider = heightAnchor.constraint(equalToConstant: 78)
+        heightWithoutSlider = heightAnchor.constraint(equalToConstant: 56)
+
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: 280),
+
+            dot.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 20),
+            dot.topAnchor.constraint(equalTo: topAnchor, constant: 10),
+            dot.widthAnchor.constraint(equalToConstant: 8),
+            dot.heightAnchor.constraint(equalToConstant: 8),
+            nameLabel.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: 8),
+            nameLabel.centerYAnchor.constraint(equalTo: dot.centerYAnchor),
+            rpmLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -20),
+            rpmLabel.centerYAnchor.constraint(equalTo: dot.centerYAnchor),
+
+            seg.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 36),
+            seg.topAnchor.constraint(equalTo: dot.bottomAnchor, constant: 8),
+
+            sliderRow.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 36),
+            sliderRow.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -20),
+            sliderRow.topAnchor.constraint(equalTo: seg.bottomAnchor, constant: 6),
+        ])
+
+        updateSliderVisibility()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func updateSliderVisibility() {
+        let show = mode == .manual
+        sliderRow.isHidden = !show
+        heightWithSlider.isActive = show
+        heightWithoutSlider.isActive = !show
+    }
+
+    @objc func segChanged() {
+        mode = FanMode(rawValue: seg.selectedSegment) ?? .auto
+        if mode == .manual {
+            // Initialize slider to current actual RPM, not stale target
+            manualRPM = max(lastActual, 2317)
+            slider.floatValue = manualRPM
+            sliderLabel.stringValue = "\(Int(manualRPM))"
+        }
+        updateSliderVisibility()
+        applyMode()
+        // Only show immediate label on mode switch (not on every tick)
+        if mode == .off {
+            rpmLabel.stringValue = "OFF"
+            dot.layer?.backgroundColor = NSColor.systemGray.cgColor
+        }
+        onChanged?()
+        if let menu = enclosingMenuItem?.menu { menu.update() }
+    }
+
+    @objc func sliderChanged() {
+        manualRPM = Float(slider.intValue)
+        sliderLabel.stringValue = "\(Int(manualRPM))"
+        applyMode()
+        // Don't touch rpmLabel here — let the poll show actual RPM
+    }
+
+    func applyMode() {
+        switch mode {
+        case .auto:
+            smcWrite("F\(fanIndex)Md", "00")
+        case .manual:
+            smcWrite("F\(fanIndex)Md", "01")
+            smcWrite("F\(fanIndex)Tg", floatHex(manualRPM))
+        case .off:
+            smcWrite("F\(fanIndex)Md", "01")
+            smcWrite("F\(fanIndex)Tg", "00000000")
+        }
+    }
+
+    func refreshDisplay() {
+        // Immediately update visuals from current state
+        needsDisplay = true
+    }
+
+    func update(actual: Float) {
+        lastActual = actual
+        let val: String
+        let color: NSColor
+        switch mode {
+        case .off:
+            val = "OFF"; color = .systemGray
+        case .manual:
+            val = "\(Int(actual)) RPM"
+            color = actual > 0 ? .systemBlue : .systemOrange
+        case .auto:
+            if actual > 0 {
+                val = "\(Int(actual)) RPM"
+                color = actual > 4000 ? .systemOrange : .systemGreen
+            } else {
+                val = "Idle"; color = .systemGray
+            }
+        }
+        rpmLabel.stringValue = val
+        dot.layer?.backgroundColor = color.cgColor
+        seg.selectedSegment = mode.rawValue
+
+        if mode == .manual && !slider.isHighlighted {
+            slider.floatValue = manualRPM
+            sliderLabel.stringValue = "\(Int(manualRPM))"
+        }
+        updateSliderVisibility()
     }
 }
 
-// MARK: - XPC Writer (for fan0-killer functionality)
-
-func xpcWriteKey(_ key: String, _ value: String) -> Bool {
-    let service = "com.crystalidea.macsfancontrol.smcwrite"
-    let conn = xpc_connection_create_mach_service(service, nil, UInt64(XPC_CONNECTION_MACH_SERVICE_PRIVILEGED))
-    xpc_connection_set_event_handler(conn) { _ in }
-    xpc_connection_resume(conn)
-
-    let openMsg = xpc_dictionary_create(nil, nil, 0)
-    xpc_dictionary_set_string(openMsg, "command", "open")
-    let _ = xpc_connection_send_message_with_reply_sync(conn, openMsg)
-
-    let writeMsg = xpc_dictionary_create(nil, nil, 0)
-    xpc_dictionary_set_string(writeMsg, "command", "write")
-    xpc_dictionary_set_string(writeMsg, "key", key)
-    xpc_dictionary_set_string(writeMsg, "value", value)
-    let reply = xpc_connection_send_message_with_reply_sync(conn, writeMsg)
-
-    var ok = false
-    if xpc_get_type(reply) == XPC_TYPE_DICTIONARY as xpc_type_t {
-        let desc = String(cString: xpc_copy_description(reply))
-        ok = desc.contains("OK")
-    }
-
-    let closeMsg = xpc_dictionary_create(nil, nil, 0)
-    xpc_dictionary_set_string(closeMsg, "command", "close")
-    let _ = xpc_connection_send_message_with_reply_sync(conn, closeMsg)
-    xpc_connection_cancel(conn)
-    return ok
-}
-
-func forceFan0Off() {
-    let _ = xpcWriteKey("F0Md", "01")
-    let _ = xpcWriteKey("F0Tg", "00000000")
-}
-
-func restoreFan0Auto() {
-    let _ = xpcWriteKey("F0Md", "00")
-}
-
-// MARK: - App Delegate
+// MARK: - App
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
     var menu: NSMenu!
     var timer: Timer?
-    var smc: SMCReader?
-    var state = FanState()
-    var fan0KillerEnabled = true
-    var lastNotificationTime: Date = .distantPast
+    var smc: SMC?
+    var lastNotif: Date = .distantPast
 
-    // Menu items we update
-    var fan0Item: NSMenuItem!
-    var fan1Item: NSMenuItem!
-    var cpuTempItem: NSMenuItem!
-    var gpuTempItem: NSMenuItem!
-    var statusItem2: NSMenuItem!
-    var toggleItem: NSMenuItem!
+    var fans: [FanView] = []
+    var fanActual: [Float] = [0, 0]
+    var cpuTemp: Float = 0; var gpuTemp: Float = 0
+    var cpuLabel: NSTextField!; var gpuLabel: NSTextField!
+    var cpuDot: NSView!; var gpuDot: NSView!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        smc = SMCReader()
-
+        smc = SMC()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        buildMenu()
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        poll()
+        let t = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in self?.poll() }
+        RunLoop.main.add(t, forMode: .common) // fires during menu tracking too
+        timer = t
+    }
 
+    func buildMenu() {
         menu = NSMenu()
+        menu.minimumWidth = 280
+        menu.autoenablesItems = false
 
-        let headerItem = NSMenuItem(title: "FanGuard — M2 Pro Fan Monitor", action: nil, keyEquivalent: "")
-        headerItem.isEnabled = false
-        let headerAttr = NSMutableAttributedString(string: "FanGuard", attributes: [
-            .font: NSFont.boldSystemFont(ofSize: 13),
+        // Fans
+        let left = FanView(name: "Left", index: 0, defaultMode: .off)
+        let right = FanView(name: "Right", index: 1, defaultMode: .auto)
+        left.onChanged = { [weak self] in self?.rebuildLayout() }
+        right.onChanged = { [weak self] in self?.rebuildLayout() }
+        fans = [left, right]
+
+        for fan in fans {
+            let item = NSMenuItem(); item.view = fan; menu.addItem(item)
+        }
+
+        menu.addItem(NSMenuItem.separator())
+
+        // Temps — single row
+        let tv = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 22))
+        cpuDot = NSView(); cpuDot.wantsLayer = true; cpuDot.layer?.cornerRadius = 4
+        let cn = NSTextField(labelWithString: "CPU"); cn.font = .systemFont(ofSize: 12); cn.textColor = .secondaryLabelColor
+        cpuLabel = NSTextField(labelWithString: "--"); cpuLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+        gpuDot = NSView(); gpuDot.wantsLayer = true; gpuDot.layer?.cornerRadius = 4
+        let gn = NSTextField(labelWithString: "GPU"); gn.font = .systemFont(ofSize: 12); gn.textColor = .secondaryLabelColor
+        gpuLabel = NSTextField(labelWithString: "--"); gpuLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+
+        for v: NSView in [cpuDot, cn, cpuLabel, gpuDot, gn, gpuLabel] {
+            tv.addSubview(v); v.translatesAutoresizingMaskIntoConstraints = false
+        }
+        NSLayoutConstraint.activate([
+            cpuDot.leadingAnchor.constraint(equalTo: tv.leadingAnchor, constant: 20),
+            cpuDot.centerYAnchor.constraint(equalTo: tv.centerYAnchor),
+            cpuDot.widthAnchor.constraint(equalToConstant: 8), cpuDot.heightAnchor.constraint(equalToConstant: 8),
+            cn.leadingAnchor.constraint(equalTo: cpuDot.trailingAnchor, constant: 6),
+            cn.centerYAnchor.constraint(equalTo: tv.centerYAnchor),
+            cpuLabel.leadingAnchor.constraint(equalTo: cn.trailingAnchor, constant: 2),
+            cpuLabel.centerYAnchor.constraint(equalTo: tv.centerYAnchor),
+            gpuDot.leadingAnchor.constraint(equalTo: tv.leadingAnchor, constant: 148),
+            gpuDot.centerYAnchor.constraint(equalTo: tv.centerYAnchor),
+            gpuDot.widthAnchor.constraint(equalToConstant: 8), gpuDot.heightAnchor.constraint(equalToConstant: 8),
+            gn.leadingAnchor.constraint(equalTo: gpuDot.trailingAnchor, constant: 6),
+            gn.centerYAnchor.constraint(equalTo: tv.centerYAnchor),
+            gpuLabel.leadingAnchor.constraint(equalTo: gn.trailingAnchor, constant: 2),
+            gpuLabel.centerYAnchor.constraint(equalTo: tv.centerYAnchor),
         ])
-        headerItem.attributedTitle = headerAttr
-        menu.addItem(headerItem)
-        menu.addItem(NSMenuItem.separator())
-
-        fan0Item = NSMenuItem(title: "Left Fan:  --", action: nil, keyEquivalent: "")
-        fan0Item.isEnabled = false
-        menu.addItem(fan0Item)
-
-        fan1Item = NSMenuItem(title: "Right Fan: --", action: nil, keyEquivalent: "")
-        fan1Item.isEnabled = false
-        menu.addItem(fan1Item)
+        let ti = NSMenuItem(); ti.view = tv; menu.addItem(ti)
 
         menu.addItem(NSMenuItem.separator())
-
-        cpuTempItem = NSMenuItem(title: "CPU Temp: --", action: nil, keyEquivalent: "")
-        cpuTempItem.isEnabled = false
-        menu.addItem(cpuTempItem)
-
-        gpuTempItem = NSMenuItem(title: "GPU Temp: --", action: nil, keyEquivalent: "")
-        gpuTempItem.isEnabled = false
-        menu.addItem(gpuTempItem)
-
-        menu.addItem(NSMenuItem.separator())
-
-        statusItem2 = NSMenuItem(title: "Status: --", action: nil, keyEquivalent: "")
-        statusItem2.isEnabled = false
-        menu.addItem(statusItem2)
-
-        menu.addItem(NSMenuItem.separator())
-
-        toggleItem = NSMenuItem(title: "Left Fan Killer: ON", action: #selector(toggleFan0Killer), keyEquivalent: "")
-        toggleItem.target = self
-        menu.addItem(toggleItem)
-
-        menu.addItem(NSMenuItem.separator())
-
-        let quitItem = NSMenuItem(title: "Quit FanGuard", action: #selector(quitApp), keyEquivalent: "q")
-        quitItem.target = self
-        menu.addItem(quitItem)
+        let q = NSMenuItem(title: "Quit FanGuard", action: #selector(quit), keyEquivalent: "q"); q.target = self
+        menu.addItem(q)
 
         statusItem.menu = menu
-
-        // Request notification permission
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
-
-        // Initial read
-        updateFanState()
-
-        // Update every 3 seconds
-        timer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-            self?.updateFanState()
-        }
     }
 
-    func updateFanState() {
-        guard let smc = smc else {
-            // Try to reconnect
-            self.smc = SMCReader()
-            return
-        }
-
-        state.fan0Actual = smc.readFloat("F0Ac") ?? 0
-        state.fan0Target = smc.readFloat("F0Tg") ?? 0
-        state.fan0Mode = smc.readUInt8("F0Md") ?? 0
-        state.fan1Actual = smc.readFloat("F1Ac") ?? 0
-        state.fan1Target = smc.readFloat("F1Tg") ?? 0
-        state.fan1Mode = smc.readUInt8("F1Md") ?? 0
-
-        // Try multiple temperature keys — Apple Silicon uses various keys
-        let tempKeys = ["Tp09", "Tp0T", "Tp01", "TC0P", "TC0p", "Tp05"]
-        for key in tempKeys {
-            if let t = smc.readFloat(key), t > 10 && t < 130 {
-                state.cpuTemp = t
-                break
+    func rebuildLayout() {
+        // Force NSMenu to recalculate item heights after slider show/hide
+        // by toggling visibility of the menu items
+        for item in menu.items {
+            if let fan = item.view as? FanView {
+                let h = fan.mode == .manual ? 78.0 : 56.0
+                fan.frame = NSRect(x: 0, y: 0, width: 280, height: h)
+                fan.heightWithSlider.isActive = fan.mode == .manual
+                fan.heightWithoutSlider.isActive = fan.mode != .manual
             }
         }
+        menu.update()
+    }
 
-        let gpuTempKeys = ["Tg0f", "Tg0T", "TG0P", "Tg05"]
-        for key in gpuTempKeys {
-            if let t = smc.readFloat(key), t > 10 && t < 130 {
-                state.gpuTemp = t
-                break
-            }
-        }
+    func poll() {
+        guard let smc = smc else { self.smc = SMC(); return }
+        for i in 0..<2 { fanActual[i] = smc.float("F\(i)Ac") ?? 0 }
+        for k in ["Tp09","Tp0T","Tp01","TC0P","TC0p","Tp05"] { if let t = smc.float(k), t > 10, t < 130 { cpuTemp = t; break } }
+        for k in ["Tg0f","Tg0T","TG0P","Tg05"] { if let t = smc.float(k), t > 10, t < 130 { gpuTemp = t; break } }
 
-        // Re-force fan 0 off if enabled
-        if fan0KillerEnabled {
-            forceFan0Off()
-        }
+        // Re-apply overrides
+        for fan in fans where fan.mode != .auto { fan.applyMode() }
 
-        // Update menu bar
         DispatchQueue.main.async { [self] in
-            if let button = statusItem.button {
-                let text = state.menuBarText
-                let attrs: [NSAttributedString.Key: Any]
-                if state.overheating || !state.fan1Healthy {
-                    attrs = [
-                        .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .bold),
-                        .foregroundColor: NSColor.systemRed
-                    ]
-                } else if state.cpuTemp > 90 {
-                    attrs = [
-                        .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .medium),
-                        .foregroundColor: NSColor.systemOrange
-                    ]
-                } else {
-                    attrs = [
-                        .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
-                    ]
-                }
-                button.attributedTitle = NSAttributedString(string: text, attributes: attrs)
+            let allOff = fans.allSatisfy { $0.mode == .off }
+            // Menu bar
+            if let b = statusItem.button {
+                let t = cpuTemp > 0 ? Int(cpuTemp) : 0
+                let c: NSColor = allOff ? .systemRed : cpuTemp > 100 ? .systemRed : cpuTemp > 90 ? .systemOrange : .labelColor
+                let icon = allOff ? "exclamationmark.triangle.fill" : "fan.fill"
+                b.image = NSImage(systemSymbolName: icon, accessibilityDescription: nil)?
+                    .withSymbolConfiguration(.init(pointSize: 12, weight: .medium))
+                b.imagePosition = .imageLeading
+                b.attributedTitle = NSAttributedString(string: allOff ? " \(t)° NO FANS" : " \(t)°", attributes: [
+                    .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium),
+                    .foregroundColor: c])
             }
-
-            // Update menu items
-            let f0StatusStr = state.fan0Status
-            fan0Item.title = "Left Fan:   \(f0StatusStr)"
-            if f0StatusStr == "DISABLED" {
-                fan0Item.image = NSImage(systemSymbolName: "xmark.circle", accessibilityDescription: nil)?
-                    .withSymbolConfiguration(.init(pointSize: 12, weight: .regular))
-            }
-
-            fan1Item.title = "Right Fan:  \(state.fan1Status)"
-            if state.fan1Healthy {
-                fan1Item.image = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: nil)?
-                    .withSymbolConfiguration(.init(pointSize: 12, weight: .regular))
-                fan1Item.image?.isTemplate = false
-            } else {
-                fan1Item.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: nil)?
-                    .withSymbolConfiguration(.init(pointSize: 12, weight: .regular))
-            }
-
-            cpuTempItem.title = "CPU Temp:   \(state.cpuTemp > 0 ? "\(Int(state.cpuTemp))°C" : "N/A")"
-            gpuTempItem.title = "GPU Temp:   \(state.gpuTemp > 0 ? "\(Int(state.gpuTemp))°C" : "N/A")"
-
-            // Status line
-            if state.overheating {
-                statusItem2.title = "Status: OVERHEATING"
-            } else if !state.fan1Healthy {
-                statusItem2.title = "Status: RIGHT FAN FAULT"
-            } else if state.cpuTemp > 90 {
-                statusItem2.title = "Status: Hot — throttling likely"
-            } else if state.cpuTemp > 75 {
-                statusItem2.title = "Status: Warm — OK"
-            } else {
-                statusItem2.title = "Status: Cool"
-            }
-
-            toggleItem.title = "Left Fan Killer: \(fan0KillerEnabled ? "ON" : "OFF")"
+            // Fans
+            for i in 0..<2 { fans[i].update(actual: fanActual[i]) }
+            // Temps
+            func tc(_ t: Float) -> NSColor { t > 100 ? .systemRed : t > 90 ? .systemOrange : t > 75 ? .systemYellow : .systemGreen }
+            cpuLabel.stringValue = cpuTemp > 0 ? "\(Int(cpuTemp))°" : "--"
+            cpuDot.layer?.backgroundColor = tc(cpuTemp).cgColor
+            gpuLabel.stringValue = gpuTemp > 0 ? "\(Int(gpuTemp))°" : "--"
+            gpuDot.layer?.backgroundColor = tc(gpuTemp).cgColor
         }
 
-        // Send notification for critical states
-        if (!state.fan1Healthy || state.overheating) && Date().timeIntervalSince(lastNotificationTime) > 60 {
-            lastNotificationTime = Date()
-            let content = UNMutableNotificationContent()
-            content.title = "FanGuard Alert"
-            if !state.fan1Healthy {
-                content.body = "Right fan is not spinning! Target: \(Int(state.fan1Target)) RPM, Actual: \(Int(state.fan1Actual)) RPM"
-            } else {
-                content.body = "CPU temperature critical: \(Int(state.cpuTemp))°C"
-            }
-            content.sound = .default
-            let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
-            UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
+        // Alert: both fans disabled
+        let allOff = fans.allSatisfy { $0.mode == .off }
+        if allOff && Date().timeIntervalSince(lastNotif) > 60 {
+            lastNotif = Date()
+            let c = UNMutableNotificationContent(); c.title = "FanGuard"
+            c.body = "Both fans disabled — no cooling active"; c.sound = .default
+            UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: c, trigger: nil))
+        }
+        // Alert: right fan fault
+        if !allOff, fans[1].mode != .off, fanActual[1] == 0, (smc.float("F1Tg") ?? 0) > 100,
+           Date().timeIntervalSince(lastNotif) > 60 {
+            lastNotif = Date()
+            let c = UNMutableNotificationContent(); c.title = "FanGuard"
+            c.body = "Right fan not spinning"; c.sound = .default
+            UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: c, trigger: nil))
         }
     }
 
-    @objc func toggleFan0Killer() {
-        fan0KillerEnabled.toggle()
-        if !fan0KillerEnabled {
-            restoreFan0Auto()
-        }
-        toggleItem.title = "Left Fan Killer: \(fan0KillerEnabled ? "ON" : "OFF")"
-    }
-
-    @objc func quitApp() {
+    @objc func quit() {
+        for f in fans where f.mode == .manual { smcWrite("F\(f.fanIndex)Md", "00") }
         NSApplication.shared.terminate(nil)
     }
 }
 
-// MARK: - Main
-
-let app = NSApplication.shared
-let delegate = AppDelegate()
-app.delegate = delegate
-app.run()
+let app = NSApplication.shared; let d = AppDelegate(); app.delegate = d; app.run()
