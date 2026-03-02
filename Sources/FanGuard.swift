@@ -276,6 +276,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var cpuTemp: Float = 0; var gpuTemp: Float = 0
     var cpuLabel: NSTextField!; var gpuLabel: NSTextField!
     var cpuDot: NSView!; var gpuDot: NSView!
+    var warningItem: NSMenuItem!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         smc = SMC()
@@ -303,6 +304,35 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         for fan in fans {
             let item = NSMenuItem(); item.view = fan; menu.addItem(item)
         }
+
+        // Warning banner — shown when both fans are off
+        let warnView = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 28))
+        warnView.wantsLayer = true
+        warnView.layer?.backgroundColor = NSColor.systemRed.withAlphaComponent(0.15).cgColor
+
+        let warnIcon = NSImageView(frame: .zero)
+        warnIcon.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 12, weight: .medium))
+        warnIcon.contentTintColor = .systemRed
+
+        let warnLabel = NSTextField(labelWithString: "No cooling — both fans off")
+        warnLabel.font = .systemFont(ofSize: 11, weight: .medium)
+        warnLabel.textColor = .systemRed
+
+        for v: NSView in [warnIcon, warnLabel] {
+            warnView.addSubview(v); v.translatesAutoresizingMaskIntoConstraints = false
+        }
+        NSLayoutConstraint.activate([
+            warnIcon.leadingAnchor.constraint(equalTo: warnView.leadingAnchor, constant: 20),
+            warnIcon.centerYAnchor.constraint(equalTo: warnView.centerYAnchor),
+            warnIcon.widthAnchor.constraint(equalToConstant: 16),
+            warnLabel.leadingAnchor.constraint(equalTo: warnIcon.trailingAnchor, constant: 6),
+            warnLabel.centerYAnchor.constraint(equalTo: warnView.centerYAnchor),
+        ])
+        warningItem = NSMenuItem()
+        warningItem.view = warnView
+        warningItem.isHidden = true
+        menu.addItem(warningItem)
 
         menu.addItem(NSMenuItem.separator())
 
@@ -376,12 +406,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 b.image = NSImage(systemSymbolName: icon, accessibilityDescription: nil)?
                     .withSymbolConfiguration(.init(pointSize: 12, weight: .medium))
                 b.imagePosition = .imageLeading
-                b.attributedTitle = NSAttributedString(string: allOff ? " \(t)° NO FANS" : " \(t)°", attributes: [
+                b.attributedTitle = NSAttributedString(string: " \(t)°", attributes: [
                     .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium),
                     .foregroundColor: c])
             }
             // Fans
             for i in 0..<2 { fans[i].update(actual: fanActual[i]) }
+            // Warning banner in dropdown
+            warningItem.isHidden = !allOff
             // Temps
             func tc(_ t: Float) -> NSColor { t > 100 ? .systemRed : t > 90 ? .systemOrange : t > 75 ? .systemYellow : .systemGreen }
             cpuLabel.stringValue = cpuTemp > 0 ? "\(Int(cpuTemp))°" : "--"

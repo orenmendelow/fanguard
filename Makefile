@@ -7,9 +7,10 @@ CLI_INSTALL = /usr/local/bin/fan0-killer
 
 build: $(APP_BUNDLE) fan0-killer
 
-$(APP_BUNDLE): Sources/FanGuard.swift Info.plist
-	mkdir -p $(APP_BUNDLE)/Contents/MacOS
+$(APP_BUNDLE): Sources/FanGuard.swift Info.plist FanGuard.icns
+	mkdir -p $(APP_BUNDLE)/Contents/MacOS $(APP_BUNDLE)/Contents/Resources
 	cp Info.plist $(APP_BUNDLE)/Contents/
+	cp FanGuard.icns $(APP_BUNDLE)/Contents/Resources/
 	swiftc -o $(APP_BUNDLE)/Contents/MacOS/$(APP_NAME) Sources/FanGuard.swift \
 		-framework IOKit -framework Cocoa -framework UserNotifications -O
 
