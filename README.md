@@ -112,6 +112,14 @@ fan0-killer --restore
 rm -rf /Applications/FanGuard.app /usr/local/bin/fan0-killer
 ```
 
+## Troubleshooting
+
+See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for common issues (fan writes failing, temps showing N/A, beeping returning, etc.)
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). The most useful contributions are compatibility reports and temperature key additions for untested Mac models.
+
 ## License
 
 MIT
