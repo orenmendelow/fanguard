@@ -12,7 +12,7 @@ $(APP_BUNDLE): Sources/FanGuard.swift Info.plist FanGuard.icns
 	cp Info.plist $(APP_BUNDLE)/Contents/
 	cp FanGuard.icns $(APP_BUNDLE)/Contents/Resources/
 	swiftc -o $(APP_BUNDLE)/Contents/MacOS/$(APP_NAME) Sources/FanGuard.swift \
-		-framework IOKit -framework Cocoa -framework UserNotifications -O
+		-parse-as-library -framework Cocoa -framework UserNotifications -O
 
 fan0-killer: Sources/fan0-killer.swift
 	swiftc -o fan0-killer Sources/fan0-killer.swift -O
